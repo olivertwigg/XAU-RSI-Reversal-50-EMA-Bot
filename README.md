@@ -2,6 +2,13 @@
 
 A fully automated algorithmic trading system for gold (XAU/USD), built from scratch in Python. The bot identifies mean-reversion opportunities using RSI extremes on 5-minute bars, executes orders via the OANDA v20 REST API, and delivers real-time signal notifications and weekly performance recaps via Telegram. A built-in backtester validates strategy performance across historical data with statistical reporting.
 
+
+## 📓 Development Journal
+
+This project was built iteratively over several months. I kept a running diary of design decisions, strategy changes, backtest results, and lessons learned throughout development — including dead ends, parameter tuning experiments, and the reasoning behind each architectural choice.
+
+[Read the development journal →](https://app.notion.com/p/XAU-RSI-Reversal-50-EMA-Bot-39fe2431311e80daa39ae5cb25da86f3?source=copy_link)
+
 ---
 
 ## Strategy
