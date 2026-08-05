@@ -10,7 +10,7 @@ Signals only — it tells you on Telegram, you place the trade.
 - 40-min cooldown after a loss; max 2 losses per day
 - Both SL & TP touched in one 5-min bar → counted as a LOSS (conservative)
 
-## Setup (on the Mac mini)
+## Setup 
 
 ```bash
 cd ~/xau-bot
