@@ -230,3 +230,4 @@ STOP_TRADING
 
 # virtual environment
 venv/
+.DS_Store
