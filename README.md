@@ -5,7 +5,10 @@ A fully automated algorithmic trading system for gold (XAU/USD), built from scra
 
 ## 📓 Development Journal
 
-This project was built iteratively over several months. I kept a running diary of design decisions, strategy changes, backtest results, and lessons learned throughout development — including dead ends, parameter tuning experiments, and the reasoning behind each architectural choice.
+A running personal log kept throughout the build — initial breakdown, iteration timeline, and the thinking 
+behind key decisions.
+
+[View the journal →](https://app.notion.com/p/XAU-RSI-Reversal-50-EMA-Bot-39fe2431311e80daa39ae5cb25da86f3?source=copy_link)
 
 [Read the development journal →](https://app.notion.com/p/XAU-RSI-Reversal-50-EMA-Bot-39fe2431311e80daa39ae5cb25da86f3?source=copy_link)
 
