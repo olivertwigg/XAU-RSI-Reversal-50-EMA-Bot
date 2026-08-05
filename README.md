@@ -10,8 +10,6 @@ behind key decisions.
 
 [View the journal →](https://app.notion.com/p/XAU-RSI-Reversal-50-EMA-Bot-39fe2431311e80daa39ae5cb25da86f3?source=copy_link)
 
-[Read the development journal →](https://app.notion.com/p/XAU-RSI-Reversal-50-EMA-Bot-39fe2431311e80daa39ae5cb25da86f3?source=copy_link)
-
 ---
 
 ## Strategy
