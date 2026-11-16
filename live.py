@@ -3,7 +3,7 @@ Live 24/7 signal loop.
 
 Polls 5-min XAUUSD bars, checks the strategy on each newly closed bar,
 sends entries/exits to Telegram, executes via OANDA if configured,
-and sends a weekly recap every Sunday at 22:00 UTC.
+and sends a weekly recap every Friday at 22:00 UTC.
 
 Weekly trade log persists to weekly_trades.json so restarts don't
 lose the week's history.
@@ -13,6 +13,13 @@ import json
 import time
 import traceback
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
+LONDON = ZoneInfo('Europe/London')
+
+def to_uk(dt: datetime) -> datetime:
+    """Convert a naive UTC datetime to UK local time for display only."""
+    return dt.replace(tzinfo=timezone.utc).astimezone(LONDON)
 import requests
 
 from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, EXECUTE, DRY_RUN
@@ -29,11 +36,9 @@ WEEKLY_LOG   = "weekly_trades.json"
 # ── persistence ────────────────────────────────────────────────────────────────
 
 def _load_weekly() -> tuple[list[dict], int | None]:
-    """Load persisted weekly trades and the ISO week they belong to."""
     try:
         with open(WEEKLY_LOG) as f:
             data = json.load(f)
-        # convert entry/exit times back to datetime
         trades = []
         for t in data.get("trades", []):
             t["entry_time"] = datetime.fromisoformat(t["entry_time"])
@@ -100,8 +105,8 @@ def weekly_recap(trades: list[dict]) -> str:
         f"Net P&L:   {pnl_emoji} {total_pnl:+.2f} $/oz",
         f"Avg win:   +{avg_win:.2f} $/oz",
         f"Avg loss:  {avg_loss:.2f} $/oz",
-        f"Best:      +{best['pnl']:.2f}  ({best['direction'].upper()} @ {best['entry']:.2f})",
-        f"Worst:     {worst['pnl']:.2f}  ({worst['direction'].upper()} @ {worst['entry']:.2f})",
+        f"Best:      {best['pnl']:+.2f}  ({best['direction'].upper()} @ {best['entry']:.2f})",
+        f"Worst:     {worst['pnl']:+.2f}  ({worst['direction'].upper()} @ {worst['entry']:.2f})",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
     if longs:
@@ -117,9 +122,12 @@ def weekly_recap(trades: list[dict]) -> str:
     lines.append("Trades this week:")
     for t in trades:
         emoji = "✅" if t["pnl"] >= 0 else "❌"
+        et = t["entry_time"]
+        if isinstance(et, str):
+            et = datetime.fromisoformat(et)
         lines.append(
             f"{emoji} {t['direction'].upper():5s} "
-            f"{t['entry_time']:%a %d %b %H:%M}  "
+            f"{to_uk(et):%a %d %b %H:%M} UK  "
             f"entry {t['entry']:.2f}  "
             f"P&L {t['pnl']:+.2f}"
         )
@@ -149,38 +157,47 @@ def main():
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             bars.index = bars.index.tz_localize(None)
 
-            # ── weekly recap: Sunday 22:00 UTC ───────────────────────────────
+            # ── weekly recap ─────────────────────────────────────────────────
             current_week = now.isocalendar()[1]
-            if (now.weekday() == 4 and now.hour == 22
-                    and recap_sent_week != current_week):
+            is_friday    = now.weekday() == 4
+
+            # normal: Friday 22:00 UTC, no open trade
+            recap_due = (
+                is_friday and now.hour >= 22
+                and recap_sent_week != current_week
+                and open_trade is None
+            )
+            # missed: it's Saturday or Sunday and recap still not sent
+            recap_overdue = (
+                now.weekday() in (5, 6)
+                and recap_sent_week != current_week
+                and open_trade is None
+            )
+            if recap_due or recap_overdue:
                 tg_send(weekly_recap(weekly_trades))
                 weekly_trades   = []
                 recap_sent_week = current_week
                 _save_weekly(weekly_trades, recap_sent_week)
-                print(f"[recap] weekly recap sent (week {current_week})")
+                reason = "overdue" if recap_overdue else "scheduled"
+                print(f"[recap] weekly recap sent ({reason}, week {current_week})")
 
-            # ── new week detection: reset if we've rolled past Sunday ────────
-            # handles the case where bot was off during Sunday 22:00
+            # ── new week: reset if rolled into Mon/Tue/Wed without recap ─────
             saved_week = recap_sent_week or current_week
-            if current_week != saved_week and now.weekday() != 6:
-                print(f"[weekly] new week detected — resetting log")
+            if current_week != saved_week and now.weekday() not in (4, 5, 6):
+                print(f"[weekly] new week — resetting log")
                 weekly_trades   = []
                 recap_sent_week = current_week
                 _save_weekly(weekly_trades, recap_sent_week)
 
-            # ── weekend force-close: Friday 21:45 UTC ───────────────────────
-            # closes any open position before the weekend gap; blocks new
-            # entries after 21:00 UTC Friday (weekday 4)
-            is_friday = now.weekday() == 4
+            # ── weekend force-close: Friday 21:45 UTC ────────────────────────
             past_cutoff = now.hour == 21 and now.minute >= 45
             if is_friday and past_cutoff and open_trade is not None:
-                # force close at current price
                 cur_price = float(bars["close"].iloc[-1])
                 pnl = (cur_price - open_trade.entry
                        if open_trade.direction == "long"
                        else open_trade.entry - cur_price)
                 won = pnl >= 0
-                state.record_result(now, won)
+                state.in_position = False
                 weekly_trades.append({
                     "direction":  open_trade.direction,
                     "entry":      open_trade.entry,
@@ -220,8 +237,6 @@ def main():
                            else open_trade.entry - exit_px)
                     won = pnl >= 0
                     state.record_result(now, won)
-
-                    # persist to weekly log
                     weekly_trades.append({
                         "direction":  open_trade.direction,
                         "entry":      open_trade.entry,
@@ -232,7 +247,6 @@ def main():
                         "pnl":        pnl,
                     })
                     _save_weekly(weekly_trades, recap_sent_week)
-
                     emoji = ("✅ RSI target" if outcome == "rsi" and won else
                              "🟡 RSI exit (red)" if outcome == "rsi" else "❌ SL hit")
                     extra = f"\nP&L: {pnl:+.2f} $/oz  (exit {exit_px:.2f})"
@@ -271,8 +285,8 @@ def main():
             # ── check for new signal ─────────────────────────────────────────
             if latest != last_bar_time:
                 last_bar_time = latest
-                # no new entries Friday after 21:00 UTC
-                if is_friday and now.hour >= 19:
+                # no new entries Friday after 18:00 UTC
+                if is_friday and now.hour >= 18:
                     sig = None
                 else:
                     sig = check_signal(bars, state, red_folder_times(), bias)

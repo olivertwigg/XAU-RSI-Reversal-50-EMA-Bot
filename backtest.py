@@ -15,6 +15,7 @@ news CSV format (optional, for historical red-folder filtering):
 import argparse
 import sys
 from datetime import datetime
+import numpy as np
 import pandas as pd
 
 from data import fetch_history, fetch_daily
@@ -22,6 +23,8 @@ from tqdm import tqdm
 from strategy import (StrategyState, check_signal, rsi, trend_bias,
                       resolve_bar, RSI_PERIOD, SL_DOLLARS,
                       TREND_EMA_PERIOD, TREND_FILTER)
+
+CAPITAL = 1000.0     # notional balance: $10 SL = 1% risk per trade
 
 
 def load_news_csv(path: str) -> list[datetime]:
@@ -137,6 +140,21 @@ def report(trades: pd.DataFrame, bars: pd.DataFrame):
     print(f" Expectancy:        {expectancy:+.2f} $/oz per trade")
     print(f" Profit factor:     {pf:.2f}")
     print(f" Max drawdown:      {max_dd:.0f} $/oz")
+
+    # Sharpe / Sortino — $1000 notional, 4.99% risk-free rate (UK NS&I 1yr)
+    RF_DAILY = 0.0499 / 252
+    trades_ts = trades.copy()
+    trades_ts["date"] = pd.to_datetime(trades_ts["exit_time"]).dt.date
+    daily_pnl = trades_ts.groupby("date")["pnl_usd"].sum()
+    cum = daily_pnl.cumsum().shift(1).fillna(0)
+    daily_ret = daily_pnl / (CAPITAL + cum)
+    excess = daily_ret - RF_DAILY
+    sharpe = excess.mean() / excess.std() * (252 ** 0.5) if excess.std() else float("nan")
+    down = excess[excess < 0]
+    sortino = excess.mean() / down.std() * (252 ** 0.5) if len(down) > 1 else float("nan")
+    print(f" Sharpe ratio:      {sharpe:.2f}")
+    print(f" Sortino ratio:     {sortino:.2f}")
+
     print(f" Max loss streak:   {max_loss_streak}")
     print(f" Avg hold time:     {hold.mean():.0f} min  (median {hold.median():.0f})")
     avg_win = trades.loc[trades.result == "win", "pnl_usd"].mean()
@@ -164,15 +182,53 @@ def report(trades: pd.DataFrame, bars: pd.DataFrame):
     print("=" * 52)
 
 
+def monte_carlo(trades: pd.DataFrame, trials: int = 10_000):
+    """Bootstrap: each trial redraws len(trades) trades with replacement.
+    Saves every balance path to mc_paths.npy (rows = trials, cols = trades)."""
+    pnl = trades.pnl_usd.to_numpy()
+    n = len(pnl)
+    draws = np.random.default_rng().integers(0, n, size=(trials, n))
+    paths = CAPITAL + pnl[draws].cumsum(axis=1)
+    np.save("mc_paths.npy", paths.astype(np.float32))
+
+    final = paths[:, -1]
+    peak = np.maximum(np.maximum.accumulate(paths, axis=1), CAPITAL)
+    max_dd = (paths - peak).min(axis=1)
+
+    print(f"\n Monte Carlo — {trials:,} trials x {n} trades, ${CAPITAL:.0f} start")
+    print(f" Avg final balance: ${final.mean():.0f}   ({final.mean() - CAPITAL:+.0f} avg gain)")
+    print(f" Median:            ${np.median(final):.0f}")
+    print(f" 5th / 95th pct:    ${np.percentile(final, 5):.0f} / ${np.percentile(final, 95):.0f}")
+    print(f" Profitable trials: {(final > CAPITAL).mean() * 100:.1f}%")
+    print(f" Max drawdown:      {np.median(max_dd):.0f} median, "
+          f"{np.percentile(max_dd, 5):.0f} worst 5%")
+    print(" Saved: mc_paths.npy")
+    print("=" * 52)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=30)
+    ap.add_argument("--start", default=None,
+                    help="start date YYYY-MM-DD; --days counts forward from here")
+    ap.add_argument("--end", default=None,
+                    help="end date YYYY-MM-DD; --days counts back from here")
+    ap.add_argument("--mc", action="store_true",
+                    help="run a 10,000-trial bootstrap Monte Carlo on the trades")
     ap.add_argument("--news-csv", default=None,
                     help="optional CSV of historical red-folder times (UTC)")
     args = ap.parse_args()
 
-    print(f"fetching {args.days} days of 5-min XAUUSD bars…")
-    bars = fetch_history(args.days)
+    if args.start:
+        end_dt = str(pd.Timestamp(args.start) + pd.Timedelta(days=args.days))
+        print(f"fetching {args.days} days of 5-min XAUUSD bars from {args.start}…")
+        bars = fetch_history(args.days, end=end_dt)
+    elif args.end:
+        print(f"fetching {args.days} days of 5-min XAUUSD bars ending {args.end}…")
+        bars = fetch_history(args.days, end=args.end)
+    else:
+        print(f"fetching {args.days} days of 5-min XAUUSD bars…")
+        bars = fetch_history(args.days)
 
     if args.news_csv:
         news_times = load_news_csv(args.news_csv)
@@ -185,3 +241,5 @@ if __name__ == "__main__":
 
     trades = run_backtest(bars, news_times)
     report(trades, bars)
+    if args.mc and not trades.empty:
+        monte_carlo(trades)

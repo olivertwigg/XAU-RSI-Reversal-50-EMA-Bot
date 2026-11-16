@@ -78,12 +78,14 @@ def fetch_bars(interval: str = "5min", limit: int = 300,
     return _parse(resp.json().get("candles", []))
 
 
-def fetch_history(days: int) -> pd.DataFrame:
+def fetch_history(days: int, end: str | None = None) -> pd.DataFrame:
     """
     Fetch `days` of 5-min bars, paging in 5000-candle chunks (~17 days each).
-    Used by the backtester.
+    Used by the backtester. `end` defaults to now; pass YYYY-MM-DD to backtest
+    a historical window.
     """
-    end   = pd.Timestamp.utcnow().floor("min").tz_localize(None)
+    end   = (pd.Timestamp(end).floor("min") if end
+             else pd.Timestamp.utcnow().floor("min")).tz_localize(None)
     start = end - pd.Timedelta(days=days)
     frames = []
     cursor_start = start

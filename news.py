@@ -1,80 +1,176 @@
 """
-Red-folder (high impact) news times from ForexFactory's public weekly JSON feed.
-Refreshed on a cache so we don't hammer the endpoint.
+News filter — red folder (high impact USD) events.
 
-For XAUUSD, USD events are what matter most; CURRENCIES is configurable.
-NOTE: this feed only covers the current week — fine for live trading.
-For backtests over past data, historical red-folder times aren't in this feed;
-the backtester will run without the news filter unless you supply a CSV
-(see backtest.py --news-csv).
+LIVE BOT:
+  Fetches this week's Forex Factory events once at startup and once per day
+  (via JBlanked free API — 1 req/day limit is fine). Caches to news_cache.json
+  so restarts don't burn the daily credit.
+
+BACKTESTER:
+  Pass the community-collated Forex Factory CSV (2007-Apr 2025) via the
+  --news-csv argument, OR drop the file at the path in NEWS_HISTORY_CSV
+  and historical_red_folder() will find it automatically.
+
+  Obtain the file from: https://huggingface.co/datasets/Tropstan/Forex_Factory_Calendar
+  (download forex_factory_cache.csv)
+
+  Coverage: 2007 – April 2025. Dates after that run without the filter
+  (live bot filters correctly in real time for those bars).
+
+Setup (live bot):
+  1. Sign up at jblanked.com -> profile -> generate API key
+  2. Add to config.py:  JBLANKED_KEY = "your-key-here"
 """
 
+import json
+import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 
-FEED = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-CURRENCIES = {"USD"}          # add "ALL" behaviour by making this empty
-_cache: dict = {"fetched": 0.0, "times": []}
-CACHE_SECONDS = 6 * 3600      # refresh every 6 hours
+CACHE_FILE       = "news_cache.json"
+CACHE_HOURS      = 23          # refresh once per day
+CURRENCIES       = {"USD"}
+NEWS_BUFFER_MIN  = 15
+
+# Drop the Hugging Face CSV here and backtests pick it up automatically.
+# Override with --news-csv on the command line.
+NEWS_HISTORY_CSV = "forex_factory_cache.csv"
+
+
+def _fetch_from_api(api_key: str) -> list[datetime]:
+    """Fetch this week's high-impact USD events from JBlanked/ForexFactory."""
+    url = "https://www.jblanked.com/news/api/forex-factory/calendar/"
+    headers = {
+        "Authorization": f"Api-Key {api_key}",
+        "Content-Type": "application/json",
+    }
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    events = resp.json()
+
+    times = []
+    for ev in events:
+        # filter: high impact USD only
+        if str(ev.get("Impact", "")).strip() != "High":
+            continue
+        currency = ev.get("Currency", "")
+        if CURRENCIES and currency not in CURRENCIES:
+            continue
+        # Date field: "2026.10.23 17:00:00" (UTC)
+        raw = ev.get("Date", "")
+        if not raw:
+            continue
+        try:
+            ts = datetime.strptime(str(raw), "%Y.%m.%d %H:%M:%S")
+            times.append(ts)  # already UTC, no tzinfo needed
+        except Exception:
+            pass
+    return times
+
+
+def _load_cache() -> tuple[list[datetime], float]:
+    """Load cached times and fetch timestamp. Returns (times, fetched_at)."""
+    try:
+        with open(CACHE_FILE) as f:
+            data = json.load(f)
+        times = [datetime.fromisoformat(t) for t in data["times"]]
+        return times, data["fetched_at"]
+    except Exception:
+        return [], 0.0
+
+
+def _save_cache(times: list[datetime]):
+    with open(CACHE_FILE, "w") as f:
+        json.dump({
+            "fetched_at": time.time(),
+            "times": [t.isoformat() for t in times],
+        }, f)
 
 
 def red_folder_times() -> list[datetime]:
-    now = time.time()
-    if now - _cache["fetched"] < CACHE_SECONDS and _cache["times"]:
-        return _cache["times"]
+    """
+    Returns this week's high-impact USD event times (UTC, naive).
+    Uses cache; only hits the API once per day.
+    """
+    cached_times, fetched_at = _load_cache()
+    age_hours = (time.time() - fetched_at) / 3600
+
+    if cached_times and age_hours < CACHE_HOURS:
+        return cached_times
+
+    # try to refresh
     try:
-        resp = requests.get(FEED, timeout=20,
-                            headers={"User-Agent": "xau-signal-bot/1.0"})
-        resp.raise_for_status()
-        events = resp.json()
-        times = []
-        for ev in events:
-            if ev.get("impact") != "High":
-                continue
-            if CURRENCIES and ev.get("country") not in CURRENCIES:
-                continue
-            # feed dates look like "2026-07-04T13:30:00-04:00"
-            ts = datetime.fromisoformat(ev["date"]).astimezone(timezone.utc)
-            times.append(ts.replace(tzinfo=None))
-        _cache.update(fetched=now, times=times)
+        from config import JBLANKED_KEY
+        if not JBLANKED_KEY or JBLANKED_KEY.startswith("YOUR_"):
+            raise ValueError("no key")
+        times = _fetch_from_api(JBLANKED_KEY)
+        _save_cache(times)
+        print(f"[news] refreshed: {len(times)} high-impact USD events this week")
+        return times
     except Exception as e:
-        print(f"[news] feed fetch failed ({e}); using last known times")
-    return _cache["times"]
+        print(f"[news] refresh failed ({e}); using cache ({len(cached_times)} events)")
+        return cached_times
 
 
-def historical_red_folder(start: str, end: str) -> list[datetime]:
+def near_news(ts: datetime, news_times: list[datetime],
+              buffer_min: int = NEWS_BUFFER_MIN) -> bool:
+    buf = timedelta(minutes=buffer_min)
+    return any(abs(ts - n) <= buf for n in news_times)
+
+
+def historical_red_folder(start: str, end: str,
+                           csv_path: str | None = None) -> list[datetime]:
     """
-    High-impact USD events between start/end (YYYY-MM-DD), via Financial
-    Modeling Prep's economic calendar. Used by the backtester. Pages in
-    ~85-day chunks (free-tier range limit). Returns UTC datetimes.
+    Load historical high-impact USD events from the community-collated
+    Forex Factory CSV (Hugging Face: Tropstan/Forex_Factory_Calendar).
+
+    Filters to the requested date range and returns UTC naive datetimes.
+    Falls back gracefully if the file is not present.
     """
-    from config import FMP_KEY
-    if not FMP_KEY or FMP_KEY.startswith("YOUR_"):
-        print("[news] no FMP_KEY in config.py -> historical news filter OFF")
-        return []
     import pandas as pd
-    times = []
-    cursor = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    while cursor <= end_ts:
-        chunk_end = min(cursor + pd.Timedelta(days=85), end_ts)
-        try:
-            r = requests.get(
-                "https://financialmodelingprep.com/api/v3/economic_calendar",
-                params={"from": cursor.strftime("%Y-%m-%d"),
-                        "to": chunk_end.strftime("%Y-%m-%d"),
-                        "apikey": FMP_KEY},
-                timeout=30)
-            r.raise_for_status()
-            for ev in r.json():
-                if ev.get("impact") != "High":
-                    continue
-                if ev.get("country") not in ("US", "USD"):
-                    continue
-                times.append(pd.Timestamp(ev["date"]).to_pydatetime())
-        except Exception as e:
-            print(f"[news] FMP fetch failed for {cursor.date()}..{chunk_end.date()}: {e}")
-        cursor = chunk_end + pd.Timedelta(days=1)
-    print(f"[news] {len(times)} historical red-folder USD events loaded")
-    return times
+
+    path = csv_path or NEWS_HISTORY_CSV
+    if not os.path.exists(path):
+        print(f"[news] {path} not found — backtest runs without news filter")
+        print("       Download from: https://huggingface.co/datasets/Tropstan/Forex_Factory_Calendar")
+        return []
+
+    try:
+        df = pd.read_csv(path, usecols=["DateTime", "Currency", "Impact"])
+
+        # Keep only high-impact USD events
+        df = df[
+            (df["Currency"] == "USD") &
+            (df["Impact"] == "High Impact Expected")
+        ].copy()
+
+        # Parse timestamps — CSV uses local Iranian time (+03:30); convert to UTC
+        df["dt_utc"] = (
+            pd.to_datetime(df["DateTime"], utc=True)
+              .dt.tz_convert("UTC")
+              .dt.tz_localize(None)
+        )
+
+        # Filter to requested backtest window (with a 1-day buffer each side)
+        t0 = pd.Timestamp(start) - pd.Timedelta(days=1)
+        t1 = pd.Timestamp(end)   + pd.Timedelta(days=1)
+        df = df[(df["dt_utc"] >= t0) & (df["dt_utc"] <= t1)]
+
+        times = df["dt_utc"].dt.to_pydatetime().tolist()
+
+        # Warn if the CSV doesn't cover the full backtest window
+        csv_end = pd.Timestamp("2025-04-07")  # known end of Hugging Face dataset
+        if pd.Timestamp(end) > csv_end:
+            uncovered_days = (pd.Timestamp(end) - csv_end).days
+            print(f"[news] loaded {len(times)} high-impact USD events from {path}")
+            print(f"       ⚠  CSV ends {csv_end:%Y-%m-%d} — last {uncovered_days} days "
+                  f"of the backtest run without the news filter")
+        else:
+            print(f"[news] loaded {len(times)} high-impact USD events from {path}")
+
+        return times
+
+    except Exception as e:
+        print(f"[news] failed to load {path}: {e} — backtest runs without news filter")
+        return []

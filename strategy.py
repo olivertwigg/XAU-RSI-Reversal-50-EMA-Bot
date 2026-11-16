@@ -11,6 +11,8 @@ Rules:
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
+_LONDON = ZoneInfo('Europe/London')
 from typing import Optional
 import pandas as pd
 
@@ -55,7 +57,7 @@ class Signal:
         return (f"{arrow} XAUUSD @ {self.entry:.2f}\n"
                 f"SL: {self.sl:.2f}  |  {tp_rule}\n"
                 f"RSI(14): {self.rsi_value:.1f}\n"
-                f"{self.time:%Y-%m-%d %H:%M} UTC")
+                f"{self.time.replace(tzinfo=__import__("datetime").timezone.utc).astimezone(_LONDON):%Y-%m-%d %H:%M} UK")
 
 
 def resolve_bar(sig: Signal, high: float, low: float,
@@ -113,7 +115,7 @@ class StrategyState:
 
 # FOMC rate decisions: always Wednesday, 19:00 or 20:00 UTC
 # Block 2 hours before (17:00/18:00) until 30 min after (19:30/20:30)
-FOMC_HOURS = {19, 20}          # UTC hour of the rate decision
+FOMC_HOURS = {18, 19}          # UTC hour of the rate decision
 FOMC_PRE_MIN  = 120            # block this many minutes before
 FOMC_POST_MIN = 30             # block this many minutes after
 
