@@ -178,7 +178,13 @@ python3 plot_mc.py
 python3 live.py
 ```
 
-**Run 24/7 on macOS (launchd):** use a launchd plist to keep the bot alive through crashes and reboots. `com.xaubot.newsupdater.plist` is a working example for the weekly news update.
+**Schedule the weekly news update (macOS launchd):** run from the project folder. This fills in your local path and installs the job.
+```bash
+sed "s|/path/to/XAU-RSI-Reversal-50-EMA-Bot|$PWD|g" com.xaubot.newsupdater.plist > ~/Library/LaunchAgents/com.xaubot.newsupdater.plist
+launchctl load ~/Library/LaunchAgents/com.xaubot.newsupdater.plist
+```
+
+**Run 24/7 on macOS (launchd):** the same pattern keeps the live bot alive through crashes and reboots — copy the plist, point it at `live.py`, and set `KeepAlive` to true.
 
 ---
 
